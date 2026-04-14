@@ -1,0 +1,233 @@
+### Allele frequency at the Nudel gRNA locus in An. funestus
+
+## Installing MalariaGen data
+# Install malariagen
+%pip install -q --no-warn-conflicts malariagen_data
+
+# Importing packages requeried to run the analysis
+
+import malariagen_data
+import pandas as pd
+import plotly.io as pio
+pio.renderers.default = "notebook+colab"
+import allel
+import numpy as np
+from bokeh.plotting import figure, show, output_notebook
+from bokeh.io import output_notebook
+from bokeh.palettes import Spectral4
+from bokeh.models import (
+    ColumnDataSource, HoverTool, NumeralTickFormatter,
+    WheelZoomTool, BoxAnnotation, Span, CustomJS, FixedTicker
+)
+
+# Installing An. funestus data as af1
+
+af1 = malariagen_data.Af1(
+    results_cache="~/malariagen_data_results_cache",
+)
+af1
+
+# Mount Google Drive
+try:
+    from google.colab import drive
+    drive.mount('drive')
+except ImportError:
+    pass
+
+# To determine which samples you want to look at, first lets call them all:
+df_samples = af1.sample_metadata()
+df_samples
+
+# Data summarizing (Here, we summarize the metadata by country to know sample size in each country using the .groupby() function)
+
+df_samples.groupby("country").size()
+
+# For this study, the dataset will include ['Gabon', 'Guinea', 'Kenya']
+
+query_parts = [
+    "taxon == 'funestus'",                      # Filter by taxon
+    "country in ['Gabon', 'Guinea', 'Kenya']",   # Or by multiple countries
+    "year >= 2000",                             # Filter by year (here since 2014)
+]
+
+# Displaying the sample set 
+
+query_str = " and ".join(query_parts)
+df_filtered = df_samples.query(query_str)
+sample_sets = df_filtered.groupby("sample_set").size().index.tolist()
+df_filtered.groupby("sample_set").size()
+
+# Finding the Nudel transcript (On VectorBase, the Nudel gene is located on the chromosome 3RL, genomic location : "9759194-9768322". This region will be use to search for Nudel transcript in An. funestus genome)
+
+af1.genome_features(region="3RL:9759194-9768322").query("type == 'mRNA'") 
+# One transcript parent is found in the region of interest "LOC125771265"
+
+transcript = "LOC125771265_t1"
+
+# Running SNPs in the Nudel transcript.
+
+snp_allele_freqs_df = af1.snp_allele_frequencies(
+    transcript=transcript,
+    cohorts="admin1_year",
+    sample_sets=sample_sets,
+    drop_invariant=False,
+)
+
+snp_filt_df = snp_allele_freqs_df
+
+# Setting up plotting function
+
+# This cell contains the plotting function_no edit it.
+output_notebook()
+def plot_snps_gRNA(df, gRNA_start_end=None, ref_color="#1f77b4", alt_color="#ff7f0e"):
+    df = df.copy().reset_index()
+    df['ref_freq'] = 1 - df['max_af']
+    df['alt_freq'] = df['max_af']
+    df['top'] = 1
+
+    source = ColumnDataSource(df)
+
+    positions = sorted(df['position'].unique())
+    min_dist = min([j - i for i, j in zip(positions[:-1], positions[1:])]) if len(positions) > 1 else 1
+    bar_width = min_dist * 0.8
+
+    wheel_zoom_x = WheelZoomTool(dimensions="width")
+    p = figure(
+        width=900, height=250,
+        x_axis_label="Position", y_axis_label="Allele frequency",
+        tools="pan,box_zoom,reset,save",
+        title=f"Allele Frequencies by Position in {transcript}",
+        y_range=(0, 1)
+    )
+    p.add_tools(wheel_zoom_x)
+    p.toolbar.active_scroll = wheel_zoom_x
+
+    # Capture the list of glyph renderers returned by vbar_stack
+    bars = p.vbar_stack(
+        stackers=['ref_freq', 'alt_freq'],
+        x='position',
+        width=bar_width,
+        color=[ref_color, alt_color],
+        legend_label=['Reference', 'Alternative'],
+        source=source
+    )
+
+    # Invisible bar for hover
+    hover_bar = p.vbar(
+        x='position',
+        top='top',
+        width=bar_width,
+        source=source,
+        fill_alpha=0,
+        line_alpha=0
+    )
+
+    # Hover tool attached only to invisible bar
+    hover = HoverTool(
+        tooltips=[
+            ("Position", "@position{0,0}"),
+            ("Reference freq", "@ref_freq{0.00}"),
+            ("Alternative freq", "@alt_freq{0.00}")
+        ],
+        renderers=[hover_bar],
+        mode='vline'
+    )
+    p.add_tools(hover)
+
+    # Format axes
+    p.xaxis.formatter = NumeralTickFormatter(format="0,0")
+    p.xaxis.major_label_orientation = 0
+    p.xaxis.major_label_text_font_size = "10pt"
+    p.xaxis.minor_tick_line_color = None
+
+    p.legend.location = "top_right"
+    p.legend.click_policy = "hide"
+
+    # Highlight regions *behind* the bars
+    if gRNA_start_end:
+        for start, end in gRNA_start_end:
+            highlight = BoxAnnotation(
+                left=start-0.5,
+                right=end+0.5,
+                fill_alpha=0.2,
+                fill_color="green",
+                level="underlay",
+                editable=False,
+                propagate_hover=True
+            )
+            p.add_layout(highlight)
+
+            # Keep the vertical dashed lines on top so they remain visible
+            p.add_layout(Span(location=start-0.5, dimension='height',
+                              line_color='green', line_dash='dashed',
+                              line_width=2, level='overlay'))
+            p.add_layout(Span(location=end+0.5, dimension='height',
+                              line_color='green', line_dash='dashed',
+                              line_width=2, level='overlay'))
+
+    # dynamic tick spacing callback (unchanged)
+    callback = CustomJS(args=dict(xaxis=p.xaxis[0]), code="""
+        const start = Math.floor(cb_obj.start);
+        const end = Math.ceil(cb_obj.end);
+        const range = end - start;
+
+        let spacing;
+        if (range > 100000) {
+            spacing = 10000;
+        } else if (range > 10000) {
+            spacing = 1000;
+        } else if (range > 1000) {
+            spacing = 100;
+        } else if (range > 100) {
+            spacing = 10;
+        } else {
+            spacing = 1;
+        }
+
+        let ticks = [];
+        for (let i = Math.ceil(start/spacing)*spacing; i <= end; i += spacing) {
+            ticks.push(i);
+        }
+
+        xaxis.ticker = ticks;
+    """)
+    p.x_range.js_on_change('start', callback)
+    p.x_range.js_on_change('end', callback)
+
+    show(p)
+    
+# Plotting the gRNA region (gRNA_regions grnomic location in *An. funestus* = [(9763229, 9763251)])
+
+# gRNA start and end:
+gRNA_regions = [(9763229, 9763251)]
+# Plot the graph (don't edit below)
+plot_snps_gRNA(snp_filt_df, gRNA_start_end=gRNA_regions)
+
+# Comment: The region targeted by the gRNA is indicated by green dashed lines with the space between them highlighted. 
+# Comment: Any vertical line on the graph indicates a nucleotide position within the gRNA target site.
+# comment: The proportion of reference alleles is shown in blue while the alternative alleles is shown by the yellow colour, so we can see whether an alternative allele is common at any position.
+
+
+#origin of sample containing SNPs 
+
+# SNP call
+
+snp_calls = af1.snp_calls(sample_query=query_str, region='3RL:9763229-9763251')
+snp_calls
+
+#list of sites with a SNP
+
+snp_sites = np.sum(snp_calls.call_genotype.compute(), axis = 1)[:,1] > 0
+list(snp_calls['variant_position'].compute()[snp_sites].data)
+
+# Enumerate samples
+
+for i, is_snp in enumerate(snp_sites):
+  if is_snp:
+    print(snp_calls['variant_position'].compute()[i].data)
+    sample_ids = [str(si) for si in list(snp_calls['sample_id'].compute()[np.sum(snp_calls.call_genotype.compute()[i,:,:], axis=1) > 0].data)]
+    for si in sample_ids:
+      query = f'sample_id == "{si}"'
+      country = str(df_filtered.query(query).country.item())
+      print("- " + si + " " + country)
+
